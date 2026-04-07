@@ -20,7 +20,8 @@ Three CSV exports from Salesforce:
 | `requests_*.csv` | grant requests (26,114 rows) |
 | `payments_*.csv` | payment transactions (42,235 rows) |
 
-Place all three CSVs in the same directory as the script. DCA (Direct Charitable Activity) requests are excluded automatically.
+Place all three CSVs in the same directory as the script. DCA (Direct Charitable Activity) requests are excluded automatically. 
+The `_*` refers to GMS report codes omitted here for data security.
 
 ## setup
 
