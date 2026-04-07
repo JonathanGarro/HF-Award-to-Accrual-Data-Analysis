@@ -1,21 +1,26 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+from matplotlib.patches import Patch
 import numpy as np
 import os
 
+# ── configuration ──────────────────────────────────────────────────────────
 os.makedirs('outputs', exist_ok=True)
 
 ORGS_FILE = 'organizations_00OUf00000EHY8VMAX.csv'
 REQUESTS_FILE = 'requests_00OUf000005GbLiMAK.csv'
-PAYMENTS_FILE = 'payments_00OUf00000HZP8GMAX.csv'
+PAYMENTS_FILE = 'payments_00OUf00000HZmXqMAL.csv'
 
 START_YEAR = 2016
 END_YEAR = 2025
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# PART 1: LOAD AND JOIN DATA
+# ══════════════════════════════════════════════════════════════════════════
 
-# load data
+# ── load data ──────────────────────────────────────────────────────────────
 orgs = pd.read_csv(ORGS_FILE, encoding='latin-1')
 requests = pd.read_csv(REQUESTS_FILE, encoding='latin-1')
 payments = pd.read_csv(PAYMENTS_FILE, encoding='latin-1')
@@ -24,7 +29,7 @@ print(f"loaded organizations: {len(orgs):,} rows")
 print(f"loaded requests: {len(requests):,} rows")
 print(f"loaded payments: {len(payments):,} rows")
 
-# clean payments
+# ── clean payments ─────────────────────────────────────────────────────────
 
 # parse dates
 payments['Payment Date'] = pd.to_datetime(
@@ -43,11 +48,12 @@ payments['Effective Year'] = payments['Effective Date'].dt.year
 # ensure amount is numeric
 payments['Payment Amount'] = pd.to_numeric(payments['Amount'], errors='coerce')
 
-# normalize reference numbers for joining
+# ── normalize reference numbers for joining ────────────────────────────────
+# requests use format like "2020-1863"; payments use "2020-01863-GRA"
 # normalize by stripping the suffix and leading zeros from the numeric portion
 
 def normalize_ref(ref):
-    """normalize grant reference numbers to a common format"""
+    """normalize grant reference numbers to a common format."""
     if pd.isna(ref):
         return None
     parts = str(ref).split('-')
@@ -59,11 +65,11 @@ def normalize_ref(ref):
 
 requests['ref_norm'] = requests['Request: Reference Number'].apply(normalize_ref)
 
-# strip the suffix (e.g., -GRA, -DCA) from payment request references
+# strip the suffix (e.g., -GRA, -DCA) from payment request references first
 payments['ref_base'] = payments['Request'].str.extract(r'^(\d{4}-\d+)')[0]
 payments['ref_norm'] = payments['ref_base'].apply(normalize_ref)
 
-# join payments to requests
+# ── join payments to requests ──────────────────────────────────────────────
 df = payments.merge(
     requests,
     on='ref_norm',
@@ -77,6 +83,7 @@ print(f"\npayments joined to requests: {len(df):,} rows")
 print(f"  matched: {matched:,}")
 print(f"  unmatched: {unmatched:,}")
 
+# ── join in organization details ───────────────────────────────────────────
 # join orgs on organization name from the requests table
 df = df.merge(
     orgs,
@@ -89,13 +96,15 @@ df = df.merge(
 print(f"full joined dataset: {len(df):,} rows")
 print(f"  with org details: {df['Organization Name'].notna().sum():,}")
 
-# exclude DCA requests
+# ── exclude DCA requests ──────────────────────────────────────────────────
+# DCA (direct charitable activity) requests are not grants and should be
+# excluded from the payments and overhang analysis
 dca_count = (df['Request Type'] == 'DCA Request').sum()
 df = df[df['Request Type'] != 'DCA Request']
 print(f"\nexcluded {dca_count:,} DCA payment records")
 print(f"  remaining: {len(df):,} rows")
 
-# filter years (config at top)
+# ── filter to last 10 full calendar years ──────────────────────────────────
 df_10yr = df[
     (df['Effective Year'] >= START_YEAR) & (df['Effective Year'] <= END_YEAR)
 ].copy()
@@ -105,7 +114,7 @@ print(f"  total payment amount: ${df_10yr['Payment Amount'].sum():,.0f}")
 print(f"  unique grants: {df_10yr['ref_norm'].nunique():,}")
 print(f"  unique organizations: {df_10yr['Organization: Organization Name'].nunique():,}")
 
-# payments by year
+# ── payments by year ──────────────────────────────────────────────────────
 print("\npayments by year:")
 year_summary = (
     df_10yr.groupby('Effective Year')['Payment Amount']
@@ -117,22 +126,25 @@ year_summary['Total Amount'] = year_summary['Total Amount'].apply(
 )
 print(year_summary.to_string())
 
-# save joined dataset
+# ── save joined dataset ───────────────────────────────────────────────────
 df_10yr.to_csv('outputs/payments_10yr_joined.csv', index=False)
 print(f"\nsaved joined dataset to outputs/payments_10yr_joined.csv")
 
 
-# overhang analysis
+# ══════════════════════════════════════════════════════════════════════════
+# PART 2: OVERHANG ANALYSIS (COHORT-BASED, YEAR BY YEAR)
+#
 # for each award year, overhang = total amount awarded that year minus the
 # portion paid out within that same calendar year. this represents the
 # future liability created by each year's grant commitments — the money
 # that "hangs over" into subsequent years.
+# ══════════════════════════════════════════════════════════════════════════
 
 print("\n" + "=" * 70)
 print("OVERHANG ANALYSIS BY PROGRAM (YEAR BY YEAR)")
 print("=" * 70)
 
-# parse award dates and amounts on the requests table
+# parse award dates and amounts on the requests table (grants only)
 requests['Award Date'] = pd.to_datetime(
     requests['President Approval/Award Date'], format='mixed', errors='coerce'
 )
@@ -148,7 +160,7 @@ pay_grants = payments.merge(
     how='inner'
 )
 
-# build cohort overhang table
+# ── build cohort overhang table ────────────────────────────────────────────
 # for each award year, by program:
 #   awarded = sum of grant amounts awarded that year
 #   same-year paid = sum of payments made in the same year as the award
@@ -184,7 +196,7 @@ for year in range(START_YEAR, END_YEAR + 1):
 
 overhang_df = pd.DataFrame(overhang_rows)
 
-# summary by program across all years
+# ── summary by program across all years ────────────────────────────────────
 print(f"\noverhang summary by program ({START_YEAR}-{END_YEAR}):")
 print("-" * 90)
 
@@ -222,7 +234,7 @@ print(
     f"  ({overall_pct:>4.1f}%)"
 )
 
-# year-by-year overhang (all programs combined)
+# ── year-by-year overhang (all programs combined) ──────────────────────────
 print(f"\nyear-by-year overhang (all programs):")
 print("-" * 90)
 
@@ -249,7 +261,7 @@ for year, row in year_totals.iterrows():
         f"  [{int(row['grants']):,} grants]"
     )
 
-# overhang by program by year (pivot table)
+# ── overhang by program by year (pivot table) ─────────────────────────────
 top_programs = prog_summary.head(8).index.tolist()
 
 print(f"\noverhang by year for top programs:")
@@ -268,7 +280,7 @@ for col in pivot_display.columns:
     pivot_display[col] = pivot_display[col].apply(lambda x: f"${x:>12,.0f}")
 print(pivot_display.to_string())
 
-# overhang rate by program by year
+# ── overhang rate (%) by program by year ───────────────────────────────────
 print(f"\noverhang rate (%) by year for top programs:")
 print("-" * 90)
 
@@ -284,7 +296,7 @@ for col in pivot_pct_display.columns:
     pivot_pct_display[col] = pivot_pct_display[col].apply(lambda x: f"{x:>6.1f}%")
 print(pivot_pct_display.to_string())
 
-# payment pacing
+# ── payment pacing: how quickly do cohort grants get paid out? ─────────────
 print(f"\npayment pacing: how grants awarded each year get paid over time")
 print("(% of award amount paid by year-end, cumulative)")
 print("-" * 90)
@@ -307,18 +319,20 @@ for year in range(START_YEAR, END_YEAR + 1):
 
     print(f"  {year} cohort (${cohort_awarded / 1e6:>6.1f}M):  {'  '.join(pacing)}")
 
-# save overhang data
+# ── save overhang data ────────────────────────────────────────────────────
 overhang_df.to_csv('outputs/overhang_by_program.csv', index=False)
 print(f"\nsaved overhang data to outputs/overhang_by_program.csv")
 
 
-#visualizations
+# ══════════════════════════════════════════════════════════════════════════
+# PART 3: VISUALIZATIONS
+# ══════════════════════════════════════════════════════════════════════════
 
 print("\n" + "=" * 70)
 print("GENERATING VISUALIZATIONS")
 print("=" * 70)
 
-# color palette and helpers
+# ── color palette and helpers ──────────────────────────────────────────────
 # order programs by total overhang for consistent color assignment
 prog_totals = (
     overhang_df.groupby('Program')['Overhang']
@@ -345,7 +359,18 @@ def save_fig(fig, name):
     plt.close(fig)
 
 
-# aggregate yearly totals for charts
+def blend_with_white(hex_color, alpha):
+    """blend a hex color with white at the given alpha to produce a solid color"""
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    r = int(r * alpha + 255 * (1 - alpha))
+    g = int(g * alpha + 255 * (1 - alpha))
+    b = int(b * alpha + 255 * (1 - alpha))
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
+# ── aggregate yearly totals for charts ─────────────────────────────────────
 yearly = overhang_df.groupby('Award Year').agg(
     awarded=('Awarded', 'sum'),
     paid=('Paid Same Year', 'sum'),
@@ -353,7 +378,7 @@ yearly = overhang_df.groupby('Award Year').agg(
 ).reset_index()
 
 
-# figure 1: stacked bar — awarded vs paid same year vs overhang
+# ── figure 1: stacked bar — awarded vs paid same year vs overhang ──────────
 fig, ax = plt.subplots(figsize=(12, 6))
 
 x = yearly['Award Year']
@@ -382,7 +407,7 @@ ax.spines['right'].set_visible(False)
 save_fig(fig, '01_awards_vs_overhang_by_year.png')
 
 
-# figure 2: stacked area — overhang by program over time
+# ── figure 2: stacked area — overhang by program over time ─────────────────
 top_n = 7
 top_viz_programs = prog_totals.head(top_n).index.tolist()
 
@@ -416,7 +441,7 @@ ax.spines['right'].set_visible(False)
 save_fig(fig, '02_overhang_by_program_stacked.png')
 
 
-# figure 3: heatmap — overhang rate (%) by program and year
+# ── figure 3: heatmap — overhang rate (%) by program and year ──────────────
 heat_data = overhang_df.pivot_table(
     index='Program', columns='Award Year',
     values=['Overhang', 'Awarded'], aggfunc='sum'
@@ -452,7 +477,7 @@ fig.colorbar(im, ax=ax, shrink=0.8, label='Overhang %')
 save_fig(fig, '03_overhang_rate_heatmap.png')
 
 
-# figure 4: horizontal bar — total overhang by program (10-year sum)
+# ── figure 4: horizontal bar — total overhang by program (10-year sum) ─────
 viz_prog_summary = overhang_df.groupby('Program').agg(
     total_awarded=('Awarded', 'sum'),
     total_overhang=('Overhang', 'sum'),
@@ -484,7 +509,7 @@ for i, (prog, row) in enumerate(viz_prog_summary.iterrows()):
 save_fig(fig, '04_total_overhang_by_program.png')
 
 
-# figure 5: line chart — overhang rate trend for major programs
+# ── figure 5: line chart — overhang rate trend for major programs ──────────
 line_programs = [p for p in top_viz_programs if p != 'Special Projects']
 
 fig, ax = plt.subplots(figsize=(12, 6))
@@ -518,7 +543,7 @@ ax.grid(axis='y', alpha=0.3)
 save_fig(fig, '05_overhang_rate_trend.png')
 
 
-# figure 6: grouped bar — awarded, paid, overhang side by side
+# ── figure 6: grouped bar — awarded, paid, overhang side by side ───────────
 fig, ax = plt.subplots(figsize=(12, 6))
 
 x = np.arange(len(yearly))
@@ -545,7 +570,7 @@ ax.spines['right'].set_visible(False)
 save_fig(fig, '06_awards_paid_overhang_grouped.png')
 
 
-# figure 7: stacked bar — total payments each year by award cohort age
+# ── figure 7: stacked bar — total payments each year by award cohort age ───
 # this shows the PAYMENT-YEAR view: all cash going out the door in a given
 # year, broken down by how old the underlying grant award is.
 # "yr0" = paid on grants awarded that same year (same-year payments)
@@ -588,7 +613,7 @@ cohort_pivot = (
     .unstack(fill_value=0)
 )
 
-# column order
+# ensure column order
 bucket_order = ['Same Year (yr0)', 'Prior Year (yr1)', 'Older (yr2+)']
 cohort_pivot = cohort_pivot[[b for b in bucket_order if b in cohort_pivot.columns]]
 
@@ -626,7 +651,9 @@ ax.spines['right'].set_visible(False)
 save_fig(fig, '07_payments_by_cohort_age.png')
 
 
-# figure 8: side-by-side — award-year view vs payment-year view
+# ── figure 8: side-by-side — award-year view vs payment-year view ──────────
+# left panel: what was awarded each year (and how much became overhang)
+# right panel: what was paid each year (and where those payments came from)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
 
@@ -682,7 +709,7 @@ fig.tight_layout()
 
 save_fig(fig, '08_award_vs_payment_year_comparison.png')
 
-# gos vs non-gos overhang analysis
+# part 4: gos vs non-gos overhang analysis
 
 print("\n" + "=" * 70)
 print("GOS VS NON-GOS OVERHANG ANALYSIS")
@@ -734,6 +761,7 @@ for year in range(START_YEAR, END_YEAR + 1):
 
 gos_overhang_df = pd.DataFrame(gos_overhang_rows)
 
+# print summary
 gos_summary = (
     gos_overhang_df.groupby(['Program', 'GOS'])
     .agg(
@@ -875,7 +903,7 @@ ax.set_xlim(0, max(gos_vals.max(), nongos_vals.max()) + 8)
 save_fig(fig, '10_gos_vs_nongos_aggregate_by_program.png')
 
 
-# expenditure responsibility overhang analysis
+# part 5: expenditure responsibility overhang analysis
 
 print("\n" + "=" * 70)
 print("EXPENDITURE RESPONSIBILITY OVERHANG ANALYSIS")
@@ -927,6 +955,7 @@ for year in range(START_YEAR, END_YEAR + 1):
 
 er_overhang_df = pd.DataFrame(er_overhang_rows)
 
+# print summary
 er_summary = (
     er_overhang_df.groupby(['Program', 'ER'])
     .agg(
@@ -1057,7 +1086,7 @@ ax.set_xlim(0, max(er_vals.max(), noner_vals.max()) + 8)
 save_fig(fig, '12_er_vs_noner_aggregate_by_program.png')
 
 
-# payment timing accuracy — scheduled vs actual dates
+# part 6: payment timing accuracy — scheduled vs actual dates
 
 print("\n" + "=" * 70)
 print("PAYMENT TIMING ACCURACY (SCHEDULED VS ACTUAL)")
@@ -1253,6 +1282,517 @@ pay_timing_out = pay_timing[[
 ]].copy()
 pay_timing_out.to_csv('outputs/payment_timing_gaps.csv', index=False)
 print(f"\nsaved timing data to outputs/payment_timing_gaps.csv")
+
+
+# part 7: forward-looking overhang analysis
+# uses a separate, more recent payments pipeline export that includes
+# scheduled future payments through 2029 and a status field
+
+PIPELINE_FILE = 'payment_details_00OUf00000HZP8GMAX.csv'
+
+print("\n" + "=" * 70)
+print("FORWARD-LOOKING OVERHANG ANALYSIS")
+print("=" * 70)
+
+pipeline = pd.read_csv(PIPELINE_FILE, encoding='latin-1')
+pipeline['Payment Date'] = pd.to_datetime(pipeline['Tranx/Paymt Date'], format='mixed', errors='coerce')
+pipeline['Scheduled Date Parsed'] = pd.to_datetime(pipeline['Scheduled Date'], format='mixed', errors='coerce')
+pipeline['Payment Amount'] = pd.to_numeric(pipeline['Amount'], errors='coerce')
+pipeline['Sched Year'] = pipeline['Scheduled Date Parsed'].dt.year
+
+data_cutoff = pipeline['Payment Date'].max()
+print(f"\npipeline export cutoff: {data_cutoff.date()}")
+print(f"scheduled payments through: {pipeline['Scheduled Date Parsed'].max().date()}")
+
+# split into paid and unpaid
+unpaid = pipeline[pipeline['Payment Date'].isna() & (pipeline['Payment Amount'] > 0)].copy()
+
+print(f"\ntotal unpaid scheduled payments: {len(unpaid):,} ({unpaid['Payment Amount'].sum()/1e6:.1f}M)")
+
+# unpaid by status
+print(f"\nunpaid by status:")
+print("-" * 60)
+for status, grp in unpaid.groupby('Status'):
+    print(f"  {status:15s}  ${grp['Payment Amount'].sum()/1e6:>8.1f}M  ({len(grp):,} payments)")
+
+# unpaid pipeline by program and year
+print(f"\nunpaid pipeline by program and year:")
+print("-" * 100)
+
+pipeline_by_prog = unpaid.groupby(['Primary Program Top Level', 'Sched Year'])['Payment Amount'].sum().unstack(fill_value=0)
+pipeline_by_prog['Total'] = pipeline_by_prog.sum(axis=1)
+pipeline_by_prog = pipeline_by_prog.sort_values('Total', ascending=False)
+
+sched_years = sorted([c for c in pipeline_by_prog.columns if c != 'Total'])
+header = f"  {'Program':35s}  {'Total':>10s}"
+for yr in sched_years:
+    header += f"  {int(yr):>10}"
+print(header)
+print("-" * 100)
+
+for prog, row in pipeline_by_prog.iterrows():
+    line = f"  {prog:35s}  ${row['Total']/1e6:>8.1f}M"
+    for yr in sched_years:
+        val = row.get(yr, 0)
+        line += f"  ${val/1e6:>8.1f}M" if val > 0 else f"  {'--':>10s}"
+    print(line)
+
+print("-" * 100)
+total_line = f"  {'TOTAL':35s}  ${pipeline_by_prog['Total'].sum()/1e6:>8.1f}M"
+for yr in sched_years:
+    total_line += f"  ${pipeline_by_prog[yr].sum()/1e6:>8.1f}M"
+print(total_line)
+
+# scheduled vs contingent breakdown by year
+print(f"\nscheduled vs contingent by year:")
+print("-" * 60)
+for yr in sched_years:
+    yr_data = unpaid[unpaid['Sched Year'] == yr]
+    sched = yr_data[yr_data['Status'] == 'Scheduled']['Payment Amount'].sum()
+    conting = yr_data[yr_data['Status'] == 'Contingent']['Payment Amount'].sum()
+    inproc = yr_data[yr_data['Status'] == 'In Process']['Payment Amount'].sum()
+    total = yr_data['Payment Amount'].sum()
+    print(f"  {int(yr)}: ${total/1e6:.1f}M total  (scheduled: ${sched/1e6:.1f}M, contingent: ${conting/1e6:.1f}M, in process: ${inproc/1e6:.1f}M)")
+
+# historical pacing model (from original payments data)
+print(f"\nhistorical pacing model (from primary dataset):")
+print("-" * 80)
+
+pacing_matrix = {}
+for award_yr in range(START_YEAR, END_YEAR + 1):
+    awarded = grants_only[grants_only['Award Year'] == award_yr]['Award Amount'].sum()
+    if awarded == 0:
+        continue
+    for age in range(0, END_YEAR - award_yr + 1):
+        pay_yr = award_yr + age
+        if pay_yr > END_YEAR:
+            break
+        cum_paid = pay_grants[
+            (pay_grants['Award Year'] == award_yr) &
+            (pay_grants['Effective Year'] <= pay_yr)
+        ]['Payment Amount'].sum()
+        pct_paid = cum_paid / awarded * 100
+        pacing_matrix.setdefault(age, []).append(pct_paid)
+
+avg_pacing = {}
+for age in sorted(pacing_matrix.keys()):
+    vals = pacing_matrix[age]
+    if age <= 2 or len(vals) >= 3:
+        avg = sum(vals) / len(vals)
+        avg_pacing[age] = avg
+        print(f"  end of year {age}: avg {avg:.1f}% paid (based on {len(vals)} cohorts)")
+
+# projected paydown for 2024 and 2025 cohorts
+print(f"\nprojected paydown for active cohorts:")
+print("-" * 80)
+
+projection_rows = []
+for award_yr in [2024, 2025]:
+    awarded = grants_only[grants_only['Award Year'] == award_yr]['Award Amount'].sum()
+    cum_paid = pay_grants[pay_grants['Award Year'] == award_yr]['Payment Amount'].sum()
+    current_pct = cum_paid / awarded * 100
+
+    print(f"\n  {award_yr} cohort (${awarded/1e6:.0f}M awarded, ${cum_paid/1e6:.0f}M paid = {current_pct:.1f}% through end of 2025):")
+
+    for future_age in range(0, 5):
+        target_yr = award_yr + future_age
+        if target_yr <= END_YEAR:
+            actual_paid = pay_grants[
+                (pay_grants['Award Year'] == award_yr) &
+                (pay_grants['Effective Year'] <= target_yr)
+            ]['Payment Amount'].sum()
+            actual_pct = actual_paid / awarded * 100
+            print(f"    end of {target_yr}: {actual_pct:.1f}% paid (actual)")
+            projection_rows.append({
+                'Award Year': award_yr, 'Calendar Year': target_yr,
+                'Type': 'Actual', 'Pct Paid': actual_pct,
+                'Cum Paid': actual_paid, 'Awarded': awarded
+            })
+        else:
+            if future_age in avg_pacing:
+                proj_pct = min(avg_pacing[future_age], 101)
+                proj_paid = awarded * proj_pct / 100
+                remaining = max(awarded - proj_paid, 0)
+                print(f"    end of {target_yr}: ~{proj_pct:.1f}% paid (projected) -- ~${remaining/1e6:.1f}M remaining")
+                projection_rows.append({
+                    'Award Year': award_yr, 'Calendar Year': target_yr,
+                    'Type': 'Projected', 'Pct Paid': proj_pct,
+                    'Cum Paid': proj_paid, 'Awarded': awarded
+                })
+
+projection_df = pd.DataFrame(projection_rows)
+
+# save forward-looking data
+unpaid.to_csv('outputs/unpaid_pipeline.csv', index=False)
+projection_df.to_csv('outputs/projected_paydown.csv', index=False)
+print(f"\nsaved pipeline data to outputs/unpaid_pipeline.csv")
+print(f"saved projection data to outputs/projected_paydown.csv")
+
+
+# figure 17: unpaid pipeline by program, segmented by year
+fig, ax = plt.subplots(figsize=(16, 7))
+
+plot_prog = pipeline_by_prog.sort_values('Total', ascending=True)
+y_pos = np.arange(len(plot_prog))
+
+year_colors = {2026: 0.9, 2027: 0.6, 2028: 0.35, 2029: 0.15}
+years_to_stack = [yr for yr in sched_years if yr >= 2026]
+
+# track segment positions for labeling
+segment_info = []
+
+left = np.zeros(len(plot_prog))
+for yr in years_to_stack:
+    vals = np.array([plot_prog.loc[p, yr] / 1e6 if yr in plot_prog.columns else 0
+                     for p in plot_prog.index])
+    for i, prog in enumerate(plot_prog.index):
+        color = hewlett_colors.get(prog, '#888888')
+        ax.barh(y_pos[i], vals[i], height=0.7, left=left[i],
+                color=color, alpha=year_colors[yr],
+                edgecolor='white', linewidth=0.5)
+        if vals[i] > 0:
+            segment_info.append({
+                'y': y_pos[i], 'left': left[i], 'width': vals[i],
+                'center': left[i] + vals[i] / 2, 'val': vals[i]
+            })
+    left += vals
+
+# segment labels — only where the segment is wide enough to fit text
+min_width = 6
+for seg in segment_info:
+    if seg['width'] >= min_width:
+        ax.text(seg['center'], seg['y'], f'${seg["val"]:.0f}M',
+                ha='center', va='center', fontsize=8, color='white',
+                fontweight='bold')
+
+# total labels
+for i, (prog, row) in enumerate(plot_prog.iterrows()):
+    ax.text(row['Total'] / 1e6 + 0.8, i, f'${row["Total"]/1e6:.1f}M',
+            va='center', fontsize=9, color='#333333')
+
+# year legend with blended shades
+legend_handles = [Patch(facecolor=blend_with_white('#555555', year_colors[yr]),
+                        edgecolor='white', label=str(int(yr)))
+                  for yr in years_to_stack]
+
+ax.set_yticks(y_pos)
+ax.set_yticklabels(plot_prog.index, fontsize=10)
+ax.set_xlabel('Unpaid Scheduled Amount ($M)', fontsize=11)
+ax.set_title('Unpaid Payment Pipeline by Program and Year',
+             fontsize=14, fontweight='bold')
+ax.legend(handles=legend_handles, fontsize=9, loc='lower right',
+         framealpha=0.9, title='Scheduled Year')
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+
+save_fig(fig, '17_unpaid_pipeline_by_program.png')
+
+
+# figures 17.x: per-program pipeline by strategy, segmented by year
+path_col = 'Intra Program Budget Allocation: Program Path'
+
+def parse_strategy(path, program):
+    """extract strategy name from the program path"""
+    if pd.isna(path):
+        return 'Unallocated'
+    path = str(path)
+    # if path doesn't start with this program, it's a cross-allocation
+    if not path.startswith(program):
+        return 'Cross-program'
+    # strip the program prefix
+    remainder = path[len(program):].strip()
+    if not remainder or remainder == '':
+        return 'General'
+    # remove leading >
+    remainder = remainder.lstrip(' >')
+    if not remainder:
+        return 'General'
+    # take first level of remaining hierarchy
+    parts = remainder.split(' > ')
+    return parts[0].strip()
+
+# programs to chart, ordered by pipeline size
+prog_order = pipeline_by_prog.sort_values('Total', ascending=False).index.tolist()
+
+for prog_idx, prog in enumerate(prog_order, start=1):
+    prog_unpaid = unpaid[unpaid['Primary Program Top Level'] == prog].copy()
+    if len(prog_unpaid) < 5:
+        continue
+
+    prog_unpaid['Strategy'] = prog_unpaid[path_col].apply(
+        lambda x: parse_strategy(x, prog)
+    )
+    prog_unpaid['Sched Year'] = prog_unpaid['Scheduled Date Parsed'].dt.year
+
+    # build pivot by strategy and year
+    strat_pivot = (
+        prog_unpaid.groupby(['Strategy', 'Sched Year'])['Payment Amount']
+        .sum().unstack(fill_value=0)
+    )
+    strat_pivot['Total'] = strat_pivot.sum(axis=1)
+    strat_pivot = strat_pivot.sort_values('Total', ascending=True)
+
+    # skip if only one strategy
+    if len(strat_pivot) < 2:
+        continue
+
+    prog_color = hewlett_colors.get(prog, '#888888')
+    fig_height = max(4, len(strat_pivot) * 0.7 + 1.5)
+    fig, ax = plt.subplots(figsize=(16, fig_height))
+
+    y_pos = np.arange(len(strat_pivot))
+    strat_years = [yr for yr in years_to_stack if yr in strat_pivot.columns]
+
+    seg_info = []
+    left = np.zeros(len(strat_pivot))
+    for yr in strat_years:
+        vals = strat_pivot[yr].values / 1e6 if yr in strat_pivot.columns else np.zeros(len(strat_pivot))
+        for i in range(len(strat_pivot)):
+            ax.barh(y_pos[i], vals[i], height=0.6, left=left[i],
+                    color=prog_color, alpha=year_colors[yr],
+                    edgecolor='white', linewidth=0.5)
+            if vals[i] > 0:
+                seg_info.append({
+                    'y': y_pos[i], 'center': left[i] + vals[i] / 2,
+                    'width': vals[i], 'val': vals[i]
+                })
+        left += vals
+
+    # segment labels where they fit
+    min_seg = max(left.max() * 0.06, 2)
+    for seg in seg_info:
+        if seg['width'] >= min_seg:
+            ax.text(seg['center'], seg['y'], f'${seg["val"]:.0f}M',
+                    ha='center', va='center', fontsize=8, color='white',
+                    fontweight='bold')
+
+    # total labels
+    for i, (strat, row) in enumerate(strat_pivot.iterrows()):
+        ax.text(row['Total'] / 1e6 + left.max() * 0.01, i,
+                f'${row["Total"]/1e6:.1f}M',
+                va='center', fontsize=9, color='#333333')
+
+    # year legend with blended shades
+    legend_handles = [Patch(facecolor=blend_with_white(prog_color, year_colors[yr]),
+                            edgecolor='white', label=str(int(yr)))
+                      for yr in strat_years]
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(strat_pivot.index, fontsize=10)
+    ax.set_xlabel('Unpaid Scheduled Amount ($M)', fontsize=11)
+    ax.set_title(f'{prog}: Unpaid Pipeline by Strategy and Year',
+                 fontsize=14, fontweight='bold', color=prog_color)
+    ax.legend(handles=legend_handles, fontsize=9, loc='lower right',
+             framealpha=0.9, title='Scheduled Year')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    save_fig(fig, f'17.{prog_idx}_{prog.lower().replace(" ", "_").replace("&", "and")}_pipeline_by_strategy.png')
+
+
+# figure 18: stacked bar — unpaid pipeline by year and program, with status shading
+fig, ax = plt.subplots(figsize=(12, 6))
+
+years_to_plot = [yr for yr in sched_years if yr >= 2026]
+x = np.arange(len(years_to_plot))
+
+# build stacked data by program
+top_pipe_progs = pipeline_by_prog.head(8).index.tolist()
+bottom = np.zeros(len(years_to_plot))
+
+for prog in top_pipe_progs:
+    vals = []
+    for yr in years_to_plot:
+        v = pipeline_by_prog.loc[prog, yr] if yr in pipeline_by_prog.columns else 0
+        vals.append(v / 1e6)
+    vals = np.array(vals)
+    color = hewlett_colors.get(prog, '#888888')
+    ax.bar(x, vals, width=0.6, bottom=bottom, label=prog,
+           color=color, edgecolor='white', linewidth=0.5)
+    bottom += vals
+
+# total labels
+for i, yr in enumerate(years_to_plot):
+    total = sum(
+        pipeline_by_prog.loc[p, yr] if yr in pipeline_by_prog.columns else 0
+        for p in pipeline_by_prog.index
+    ) / 1e6
+    ax.text(i, total + 2, f'${total:.0f}M', ha='center', va='bottom',
+            fontsize=10, fontweight='bold', color='#333333')
+
+ax.set_xticks(x)
+ax.set_xticklabels([int(yr) for yr in years_to_plot], fontsize=11)
+ax.set_xlabel('Scheduled Year', fontsize=11)
+ax.set_ylabel('Unpaid Amount ($M)', fontsize=11)
+ax.set_title(f'Unpaid Payment Pipeline by Year and Program',
+             fontsize=14, fontweight='bold')
+ax.legend(loc='upper right', fontsize=8, framealpha=0.9, ncol=2)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+
+save_fig(fig, '18_unpaid_pipeline_by_year_program.png')
+
+
+# figure 19: scheduled vs contingent by year
+fig, ax = plt.subplots(figsize=(12, 6))
+
+status_colors = {
+    'Scheduled / In Process': '#0B3D91',
+    'Contingent': '#E07B39',
+}
+
+years_19 = [yr for yr in years_to_plot if yr <= 2028]
+x = np.arange(len(years_19))
+w = 0.7
+bottom = np.zeros(len(years_19))
+
+for status_label, statuses in [('Scheduled / In Process', ['Scheduled', 'In Process']),
+                                ('Contingent', ['Contingent'])]:
+    vals = []
+    for yr in years_19:
+        yr_status = unpaid[(unpaid['Sched Year'] == yr) & (unpaid['Status'].isin(statuses))]
+        vals.append(yr_status['Payment Amount'].sum() / 1e6)
+    vals = np.array(vals)
+    if vals.sum() > 0:
+        ax.bar(x, vals, width=w, bottom=bottom, label=status_label,
+               color=status_colors.get(status_label, '#888888'),
+               edgecolor='white', linewidth=0.5)
+        # segment labels
+        for i in range(len(vals)):
+            if vals[i] >= 8:
+                ax.text(x[i], bottom[i] + vals[i] / 2, f'${vals[i]:.0f}M',
+                        ha='center', va='center', fontsize=9,
+                        color='white', fontweight='bold')
+        bottom += vals
+
+for i, yr in enumerate(years_19):
+    total = bottom[i]
+    ax.text(i, total + 2, f'${total:.0f}M', ha='center', va='bottom',
+            fontsize=10, fontweight='bold', color='#333333')
+
+ax.set_xticks(x)
+ax.set_xticklabels([int(yr) for yr in years_19], fontsize=11)
+ax.set_xlabel('Scheduled Year', fontsize=11)
+ax.set_ylabel('Unpaid Amount ($M)', fontsize=11)
+ax.set_title('Unpaid Pipeline by Year: Scheduled vs Contingent',
+             fontsize=14, fontweight='bold')
+ax.legend(fontsize=10, loc='upper right', framealpha=0.9)
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+
+save_fig(fig, '19_scheduled_vs_contingent_by_year.png')
+
+
+# figure 20: pipeline by program, year, and status (vertical grouped bars)
+fig, ax = plt.subplots(figsize=(16, 8))
+
+plot_years = [2026, 2027, 2028]
+year_labels = {2026: "'26", 2027: "'27", 2028: "'28"}
+
+# combine scheduled + in process
+unpaid['Status Group'] = unpaid['Status'].apply(
+    lambda s: 'Scheduled / In Process' if s in ('Scheduled', 'In Process') else s
+)
+
+# programs ordered by total pipeline (largest first, left to right)
+prog_order_20 = pipeline_by_prog.sort_values('Total', ascending=False).index.tolist()
+prog_order_20 = [p for p in prog_order_20
+                 if pipeline_by_prog.loc[p, 'Total'] > 1e6]
+
+n_progs = len(prog_order_20)
+n_years = len(plot_years)
+bar_w = 0.25
+group_positions = np.arange(n_progs)
+
+for j, yr in enumerate(plot_years):
+    x_offset = (j - (n_years - 1) / 2) * bar_w
+
+    for i, prog in enumerate(prog_order_20):
+        prog_yr = unpaid[
+            (unpaid['Primary Program Top Level'] == prog) &
+            (unpaid['Sched Year'] == yr)
+        ]
+
+        sched_amt = prog_yr[prog_yr['Status Group'] == 'Scheduled / In Process']['Payment Amount'].sum() / 1e6
+        conting_amt = prog_yr[prog_yr['Status Group'] == 'Contingent']['Payment Amount'].sum() / 1e6
+        total = sched_amt + conting_amt
+
+        prog_color = hewlett_colors.get(prog, '#888888')
+        x_pos = group_positions[i] + x_offset
+
+        # scheduled/in process segment
+        ax.bar(x_pos, sched_amt, width=bar_w, bottom=0,
+               color=prog_color, alpha=0.9,
+               edgecolor='white', linewidth=0.5)
+
+        # contingent segment
+        if conting_amt > 0:
+            ax.bar(x_pos, conting_amt, width=bar_w, bottom=sched_amt,
+                   color=prog_color, alpha=0.35,
+                   edgecolor='white', linewidth=0.5)
+
+        # segment labels where they fit
+        min_seg_h = 5
+        if sched_amt >= min_seg_h:
+            ax.text(x_pos, sched_amt / 2, f'${sched_amt:.0f}M',
+                    ha='center', va='center', fontsize=7,
+                    color='white', fontweight='bold')
+        if conting_amt >= min_seg_h:
+            ax.text(x_pos, sched_amt + conting_amt / 2, f'${conting_amt:.0f}M',
+                    ha='center', va='center', fontsize=7,
+                    color='#555555', fontweight='bold')
+
+        # total label on top
+        if total > 0.5:
+            ax.text(x_pos, total + 1, f'${total:.0f}M',
+                    ha='center', va='bottom', fontsize=7, color='#555555')
+
+# year tick labels under each bar
+year_x_positions = []
+year_tick_labels = []
+for i in range(n_progs):
+    for j, yr in enumerate(plot_years):
+        x_offset = (j - (n_years - 1) / 2) * bar_w
+        year_x_positions.append(group_positions[i] + x_offset)
+        year_tick_labels.append(year_labels[yr])
+
+ax.set_xticks(year_x_positions)
+ax.set_xticklabels(year_tick_labels, fontsize=7, color='#777777')
+
+# program labels as secondary annotation below year ticks
+prog_display_names = {
+    'Gender Equity & Governance': 'Gender Equity\n& Governance',
+    'U.S. Democracy': 'U.S.\nDemocracy',
+    'Economy and Society': 'Economy\n& Society',
+}
+for i, prog in enumerate(prog_order_20):
+    label = prog_display_names.get(prog, prog)
+    ax.text(group_positions[i], -0.08, label,
+            ha='center', va='top', fontsize=9, fontweight='bold',
+            color=hewlett_colors.get(prog, '#333333'),
+            transform=ax.get_xaxis_transform())
+
+ax.set_ylabel('Unpaid Amount ($M)', fontsize=11)
+ax.set_title('Unpaid Pipeline by Program, Year, and Status',
+             fontsize=14, fontweight='bold')
+ax.spines['top'].set_visible(False)
+ax.spines['right'].set_visible(False)
+ax.set_xlim(-0.5, n_progs - 0.5)
+ax.tick_params(axis='x', pad=2)
+
+# add space below for program labels
+fig.subplots_adjust(bottom=0.18)
+
+# legend for status
+legend_handles_20 = [
+    Patch(facecolor=blend_with_white('#555555', 0.9), edgecolor='white',
+          label='Scheduled / In Process'),
+    Patch(facecolor=blend_with_white('#555555', 0.35), edgecolor='white',
+          label='Contingent'),
+]
+ax.legend(handles=legend_handles_20, fontsize=10, loc='upper right', framealpha=0.9)
+
+save_fig(fig, '20_pipeline_by_program_year_status.png')
 
 
 print("\ndone -- all outputs saved to outputs/")
