@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+
+# macOS
+.DS_Store
+
+# Project outputs
+outputs/
+
+# Word temporary files
+~$*.docx
+
+# CSV data files (potentially sensitive)
+*.csv
+*.docx
