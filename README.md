@@ -1,4 +1,4 @@
-# payment-overhang-analysis
+# payment overhang analysis
 
 Analysis of grant payment overhang at the Hewlett Foundation, covering 10 years of grantmaking data (2016-2025). Overhang is the portion of a grant commitment that has been approved but not yet paid out within the award year. The script joins Salesforce exports across requests, payments, and organizations, then produces console summaries, CSVs, and visualizations across several dimensions.
 
